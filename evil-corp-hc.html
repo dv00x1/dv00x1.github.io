@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en-US">
+  <head>
+    <meta charset="utf-8" />
+    <link href="styles/style.css" rel="stylesheet" />
+    <title>Evil Corp [HC] — dinvoke</title>
+    <link rel="shortcut icon" href="images/favicon.ico" type="image/x-icon" />
+    <link
+      href="https://fonts.googleapis.com/css?family=Playfair+Display+SC"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css?family=Linden+Hill"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css?family=Cormorant"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css?family=Cinzel"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <header class="page-header">
+      <h1 class="page-title"><a href="articles.html">Evil Corp [HC]</a></h1>
+      <p class="page-sub">MMXXVI ✧ I</p>
+    </header>
+
+    <article class="article-page">
+      <p class="about-sub">✧ ✧ ✧</p>
+
+<p>Essa máquina apresenta uma vulnerabilidade na configuração do LAPS, permitindo com que atacantes obtenham acesso administrativo no AD.</p>
+<center><img src="images/evilcorp1.png" alt="Evil Corp" width="100%"></center>
+
+<p>Fazendo um scan de portas temos o Kerberos na porta 88, o SMB nas portas 135 e 445, e também o LDAP na porta 389,3268 RDP 3389. E também conseguimos o nome do domínio.</p>
+<p>Enumerando o smb passando o usuário guest podemos ver permissão de leitura e escrita na share scripts:</p>
+<center><img src="images/evilcorp2.png" alt="SMB enum" width="100%"></center>
+
+<p>Olhando essa share temos um arquivo chamado <code>autobackup.ps1</code> que contém:</p>
+<center><img src="images/evilcorp3.png" alt="autobackup.ps1" width="100%"></center>
+
+<p>Esse script faz um backup de arquivos automaticamente. Ele cria uma pasta, se necessário, zipa os arquivos da pasta C:\files com o tar, e salva o backup compactado em C:\backups com o timestamp no nome.</p>
+<p>Então o que podemos fazer? Já que temos permissão de escrita, podemos alterar o script e adicionar um payload de reverse shell, para que se caso existir alguma tarefa agendada com esse script, retorne uma shell.</p>
+<p>Então esperando um pouco temos shell:</p>
+<center><img src="images/evilcorp4.png" alt="reverse shell" width="100%"></center>
+
+<p>Procurando um pouco no sistema temos as credenciais do phillip:</p>
+<center><img src="images/evilcorp5.png" alt="phillip creds" width="100%"></center>
+
+<p>Então trocamos nossa shell pelo evil-winrm para podermos olhar os privilégios e interagir melhor:</p>
+<center><img src="images/evilcorp6.png" alt="evil-winrm" width="100%"></center>
+
+<p>O privilégio SeMachineAccountPrivilege é um privilégio que permite a uma conta de computador a capacidade de alterar ou criar sua própria conta de máquina, também podemos incluir a capacidade de adicionar grupos específicos, como administradores de um domínio.</p>
+<p>Aqui primeiro fazemos a criação do nosso "computador":</p>
+<center><img src="images/evilcorp7.png" alt="add machine" width="100%"></center>
+
+<p>Com isso, adicionamos com sucesso uma máquina no AD. Agora, usando o netexec, faremos um dump dessas informações e as enviaremos para o BloodHound. Essa ferramenta permite identificar caminhos de ataque e relações complexas entre objetos no Active Directory, revelando permissões de acesso que facilitam movimentos laterais e escalada de privilégios.</p>
+<p>Após isso, abrimos o bloodhound e notamos que no NodeInfo contém o <strong>LAPS ENABLED</strong>. O LAPS (Local Administrator Password Solution) gerencia senhas de administradores locais em computadores de domínio. Podemos usar isso a nosso favor.</p>
+<p>Vemos também que possuímos um Outbound Object Control. "Group Delegated Object Control" é a delegação de permissões a grupos para gerenciar objetos no Active Directory. Isso permite que tarefas administrativas específicas sejam atribuídas sem conceder acesso total.</p>
+<p>Um exemplo de delegação é resetar senhas.</p>
+<center><img src="images/evilcorp8.png" alt="bloodhound" width="100%"></center>
+
+<p>Temos a possibilidade de usar o pyLAPS.py para isso, mas optei por continuar utilizando o netexec. Para fazer isso é simples:</p>
+<center><img src="images/evilcorp9.png" alt="netexec laps" width="100%"></center>
+
+<p>Com isso é só logar e conseguimos Administrator.</p>
+<center><img src="images/evilcorp10.png" alt="administrator" width="100%"></center>
+
+<p><em>como já diria meu amigo fzin booyah</em></p>
+
+      <a href="articles.html" class="about-back">✧ Return</a>
+    </article>
+  </body>
+</html>

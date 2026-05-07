@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en-US">
+  <head>
+    <meta charset="utf-8" />
+    <link href="styles/style.css" rel="stylesheet" />
+    <title>What is D/Invoke? — dinvoke</title>
+    <link rel="shortcut icon" href="images/favicon.ico" type="image/x-icon" />
+    <link
+      href="https://fonts.googleapis.com/css?family=Playfair+Display+SC"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css?family=Linden+Hill"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css?family=Cormorant"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css?family=Cinzel"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <header class="page-header">
+      <h1 class="page-title"><a href="articles.html">What is D/Invoke?</a></h1>
+      <p class="page-sub">MMXXVI ✧ II</p>
+    </header>
+
+    <article class="article-page">
+      <p class="about-sub">✧ ✧ ✧</p>
+
+<h2 class="article-h2">What are Windows APIs?</h2>
+<p>APIs (Application Programming Interfaces) are ready-made functions that Windows provides for programs. For example, if you want to open a window, you don't need to program from scratch how to draw pixels on the screen. You simply call the CreateWindow API that Windows already provides ready-to-use.</p>
+<h2 class="article-h2">How Do We Traditionally Use APIs?</h2>
+<p>When you write a program in C++, C# or Python and want to use a Windows API, you typically do it like this:</p>
+<pre><code class="language-c">#include &lt;windows.h&gt;
+MessageBox(NULL, &quot;Daniel is beautiful&quot;, &quot;Cool Title&quot;, 0);
+</code></pre>
+<p>This is called static import. "Static" means it happens at compile time. When you compile your program using static import, the compiler creates an import table (IAT - Import Address Table) inside the executable.</p>
+<h3>What is IAT?</h3>
+<p>The IAT is like an index at the beginning of a book. It lists all the APIs that your program will use. It's literally a list that says:</p>
+<pre><code>My program uses:
+- MessageBox from user32.dll
+- CreateFile from kernel32.dll
+- RegOpenKey from advapi32.dll
+</code></pre>
+<h3>Why is this a problem?</h3>
+<p>Antivirus and security tools read your program's IAT before it even executes. They perform static analysis, meaning they analyze the file while it's sitting on disk. If the security tool sees in the IAT:</p>
+<ul class="activity-list">
+  <li>VirtualAlloc (allocates memory)</li>
+  <li>WriteProcessMemory (writes to another process)</li>
+  <li>CreateRemoteThread (creates remote thread)</li>
+</ul>
+
+<p>It thinks: "This program has code injection behavior" and blocks it.</p>
+<p>Beyond the IAT, the problem includes:</p>
+<ul class="activity-list">
+  <li>Plain text strings: "cmd.exe", "powershell.exe" are visible in the file</li>
+  <li>Function names: appear literally in the compiled code</li>
+  <li>Arguments: passed parameters are readable</li>
+</ul>
+
+<h2 class="article-h2">D/Invoke</h2>
+<p>D/Invoke or Dynamic Invoke, completely changes the approach. Instead of declaring in the code "I'm going to use function X from DLL Y", you:</p>
+<ul class="activity-list">
+  <li>At runtime (program already running), ask Windows: "where is the user32 DLL?"</li>
+  <li>Then ask: "inside this DLL, where is the MessageBox function?"</li>
+  <li>Receive a memory address (pointer)</li>
+  <li>Execute the function through that address</li>
+</ul>
+
+<p>The advantage is your executable's IAT is practically empty. Static analysis tools look and see "this program doesn't import anything suspicious" because the imports happen dynamically afterwards.</p>
+<h2 class="article-h2">Dynamic Invocation</h2>
+<p>Dynamic Invocation is the fundamental technique that D/Invoke uses. Let's break it down into three mandatory steps.</p>
+<h3>1. Obtain the DLL Handle.</h3>
+<p>Handle is an identifier number that Windows uses to reference objects. Think of the handle as a protocol number. When you open a support ticket, you receive a number like "Protocol #12345". That number isn't the ticket itself, but allows Windows to locate the ticket. For DLLs, the handle is the "protocol number" that identifies where the DLL is loaded in memory.</p>
+<h4>What is a DLL?</h4>
+<p>DLL (Dynamic Link Library) is a file that contains ready-made functions. It's like a physical library: inside it has several books (functions). To get a specific book, you first need to know where the library is (the DLL handle). Examples of important DLLs:</p>
+<ul class="activity-list">
+  <li>kernel32.dll</li>
+  <li>user32.dll</li>
+  <li>advapi32.dll</li>
+  <li>ntdll.dll</li>
+</ul>
+
+<pre><code class="language-c">Option A: GetModuleHandle
+HMODULE hModule = GetModuleHandleA(&quot;user32.dll&quot;);
+
+Option B: LoadLibrary
+HMODULE hModule = LoadLibraryA(&quot;user32.dll&quot;);
+</code></pre>
+<p>What is HMODULE? HMODULE is a type defined by Windows that represents a module handle (DLL). Internally it's just a pointer (memory address), but Windows uses a typedef to make the code more readable:</p>
+<pre><code class="language-c">typedef HANDLE HMODULE;  // Windows definition
+</code></pre>
+<h3>2. Obtain the function address.</h3>
+<p>Now that we have the DLL handle (we know where the library is), we need to find a specific function inside it. Let's use the GetProcAddress API:</p>
+<pre><code class="language-c">FARPROC pFunction = GetProcAddress(hModule, &quot;MessageBoxA&quot;);
+</code></pre>
+<p>Every DLL has an internal structure called Export Table. It's like a book's index:</p>
+<pre><code>user32.dll Export Table:
+- MessageBoxA: address 0x7FFA1234
+- MessageBoxW: address 0x7FFA1238
+- CreateWindowA: address 0x7FFA1240
+</code></pre>
+<p>GetProcAddress reads the DLL's Export Table, searches for the name "MessageBoxA", finds the corresponding address, and returns that address. So here's a complete example so far:</p>
+<pre><code class="language-c">HMODULE hUser32 = LoadLibraryA(&quot;user32.dll&quot;);
+
+if (hUser32 == NULL) {
+    printf(&quot;Error loading DLL\n&quot;);
+    return -1;
+}
+
+FARPROC pMessageBox = GetProcAddress(hUser32, &quot;MessageBoxA&quot;);
+
+if (pMessageBox == NULL) {
+    printf(&quot;Error finding function\n&quot;);
+    return -1;
+}
+
+printf(&quot;MessageBoxA is at: 0x%p\n&quot;, pMessageBox);
+</code></pre>
+<p>Remember that here we're not executing MessageBoxA, we just have its address.</p>
+<h3>3. Execute the function.</h3>
+<p>Now we have a memory address (pointer) pointing to the function. But we can't simply call pMessageBox() because the compiler doesn't know the function's signature. Signature is the function's "format": what parameters it receives and what it returns. MessageBoxA has this signature:</p>
+<pre><code class="language-c">int MessageBoxA(
+    HWND hWnd,        // Parent window handle
+    LPCSTR lpText,    // Message text
+    LPCSTR lpCaption, // Window title
+    UINT uType        // Button/icon type
+);
+</code></pre>
+<p>We need to inform the compiler: "this pointer points to a function with THIS specific signature". Using typedef to Define Signature:</p>
+<pre><code class="language-c">typedef int (WINAPI* PMESSAGEBOX)(HWND, LPCSTR, LPCSTR, UINT);
+</code></pre>
+<p>Cast is type conversion. We're saying: "this generic address is, in fact, a MessageBox function".</p>
+<pre><code class="language-c">PMESSAGEBOX pMessageBox = (PMESSAGEBOX)GetProcAddress(hUser32, &quot;MessageBoxA&quot;);
+
+pMessageBox(NULL, &quot;Daniel is beautiful&quot;, &quot;Cool Title&quot;, 0);
+</code></pre>
+<h2 class="article-h2">Is This Enough?</h2>
+<p>Even using the 3 steps above, we still have detection problems. When you compile the code above, the strings remain readable in the executable:</p>
+<pre><code class="language-c">LoadLibraryA(&quot;user32.dll&quot;);       // &quot;user32.dll&quot; is visible
+GetProcAddress(h, &quot;MessageBoxA&quot;); // &quot;MessageBoxA&quot; is visible
+</code></pre>
+<p>Problem 2: Known API Names. Your code still uses the real names: LoadLibraryA and GetProcAddress. Security tools look for exactly this pattern: "program that uses LoadLibrary + GetProcAddress is suspicious".</p>
+<p>Problem 3: Import Table Still Has Traces. Even though MessageBoxA isn't in the IAT, LoadLibraryA and GetProcAddress still are.</p>
+<h2 class="article-h2">How Can We Solve This?</h2>
+<p>To solve the problems above, we apply two additional techniques. We can encrypt our strings with XOR. So we have: MessageBoxW.</p>
+<p>Convert to Hexadecimal:</p>
+<pre><code>M = 0x4D
+e = 0x65
+s = 0x73
+s = 0x73
+a = 0x61
+g = 0x67
+e = 0x65
+B = 0x42
+o = 0x6F
+x = 0x78
+W = 0x57
+
+{ 0x4D, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x42, 0x6F, 0x78, 0x57 }
+</code></pre>
+<p>Set a Secret Key:</p>
+<pre><code>char mySecretKey[] = &quot;gohacking&quot;;
+
+g = 0x67
+o = 0x6F
+h = 0x68
+a = 0x61
+c = 0x63
+k = 0x6B
+i = 0x69
+n = 0x6E
+g = 0x67
+</code></pre>
+<p>Apply XOR Byte by Byte:</p>
+<pre><code>M (0x4D) XOR g (0x67) = 0x2A
+e (0x65) XOR o (0x6F) = 0x0A
+s (0x73) XOR h (0x68) = 0x1B
+s (0x73) XOR a (0x61) = 0x12
+a (0x61) XOR c (0x63) = 0x02
+g (0x67) XOR k (0x6B) = 0x0C
+e (0x65) XOR i (0x69) = 0x0C
+B (0x42) XOR n (0x6E) = 0x2C
+o (0x6F) XOR g (0x67) = 0x08
+x (0x78) XOR g (0x67) = 0x1F
+W (0x57) XOR o (0x6F) = 0x38
+</code></pre>
+<p>Encrypted Result:</p>
+<pre><code class="language-c">unsigned char eMessageBoxW[] = { 
+    0x2A, 0x0A, 0x1B, 0x12, 0x02, 0x0C, 0x0C, 0x2C, 0x08, 0x1F, 0x38 
+};
+</code></pre>
+<p>Implement XOR Function:</p>
+<pre><code class="language-c">void XOR(char* data, size_t data_len, char* key, size_t key_len) {
+    int j = 0; // Key index
+
+    for (int i = 0; i &lt; data_len; i++) {
+        if (j == key_len - 1) {
+            j = 0;
+        }
+
+        data[i] = data[i] ^ key[j];
+        j++;
+    }
+}
+</code></pre>
+<p>How the function works: "j" controls which position of the key we're using. For each byte of the string, XOR with corresponding key byte. If key ends, restart from beginning (allows keys smaller than data). Modifies data in place.</p>
+<p>Now let's use it in code:</p>
+<pre><code class="language-c">char mySecretKey[] = &quot;gohacking&quot;;
+
+unsigned char eMessageBoxW[] = { 
+    0x2A, 0x0A, 0x1B, 0x12, 0x02, 0x0C, 0x0C, 0x2C, 0x08, 0x1F, 0x38, 0x00 
+};
+
+XOR((char*)eMessageBoxW, sizeof(eMessageBoxW) - 1, mySecretKey, sizeof(mySecretKey) - 1);
+
+GetProcAddress(hModule, (char*)eMessageBoxW);
+</code></pre>
+<p>We have the advantage that if someone opens our executable in a hex editor, they'll see:</p>
+<pre><code>2A 0A 1B 12 02 0C 0C 2C 08 1F 38  // MessageBoxW with our super secret key.
+</code></pre>
+<p>Instead of:</p>
+<pre><code>4D 65 73 73 61 67 65 42 6F 78 57  // &quot;MessageBoxW&quot;
+</code></pre>
+<p>Of course, normally we'll take this super secret key and put it on our server, so it won't be directly in the code.</p>
+<p>And that's how we can use D/Invoke and obfuscate code strings.</p>
+<p>I Love God.
+Made by Daniel Andrade.</p>
+
+      <a href="articles.html" class="about-back">✧ Return</a>
+    </article>
+  </body>
+</html>

